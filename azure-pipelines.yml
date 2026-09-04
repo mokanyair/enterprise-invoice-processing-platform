@@ -1,0 +1,33 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    clean: true
+
+  - script: |
+      echo "======================================"
+      echo "EIPP PR Validation"
+      echo "======================================"
+      echo "Repository: $(Build.Repository.Name)"
+      echo "Branch: $(Build.SourceBranch)"
+      echo "Commit: $(Build.SourceVersion)"
+      git status
+    displayName: Validate repository checkout
+
+  - script: |
+      test -f README.md
+      test -d lambda
+      test -d modules
+      echo "Baseline repository structure validated."
+    displayName: Validate baseline repository structure
