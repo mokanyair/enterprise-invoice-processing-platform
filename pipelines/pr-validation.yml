@@ -1,0 +1,115 @@
+trigger: none
+
+pr:
+  autoCancel: true
+  drafts: false
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  TF_VERSION: '1.16.1'
+  TFLINT_VERSION: 'v0.64.0'
+  TRIVY_VERSION: 'v0.74.0'
+
+steps:
+  - checkout: self
+    clean: true
+    fetchDepth: 0
+
+  - bash: |
+      set -euo pipefail
+
+      sudo apt-get update -qq
+      sudo apt-get install -y unzip
+
+      curl -fsSLo terraform.zip \
+        "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+
+      unzip -q terraform.zip
+      sudo install terraform /usr/local/bin/terraform
+
+      terraform version
+    displayName: Install Terraform
+
+  - bash: |
+      set -euo pipefail
+
+      curl -fsSLo tflint.zip \
+        "https://github.com/terraform-linters/tflint/releases/download/$(TFLINT_VERSION)/tflint_linux_amd64.zip"
+
+      unzip -q tflint.zip
+      sudo install tflint /usr/local/bin/tflint
+
+      tflint --version
+    displayName: Install TFLint
+
+  - bash: |
+      set -euo pipefail
+
+      curl -sfL \
+        https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+        | sudo sh -s -- -b /usr/local/bin $(TRIVY_VERSION)
+
+      trivy --version
+    displayName: Install Trivy
+
+  - bash: |
+      set -euo pipefail
+
+      terraform fmt -check -recursive infrastructure
+    displayName: Terraform format check
+
+  - bash: |
+      set -euo pipefail
+
+      ROOTS=(
+        "infrastructure/bootstrap"
+        "infrastructure/environments/dev"
+        "infrastructure/environments/prod"
+      )
+
+      for ROOT in "${ROOTS[@]}"; do
+        echo "========================================"
+        echo "Validating ${ROOT}"
+        echo "========================================"
+
+        terraform -chdir="$ROOT" init \
+          -backend=false \
+          -input=false
+
+        terraform -chdir="$ROOT" validate
+      done
+    displayName: Terraform validate
+
+  - bash: |
+      set -euo pipefail
+
+      tflint --recursive \
+        --chdir infrastructure \
+        --format compact
+    displayName: TFLint
+
+  - bash: |
+      set -euo pipefail
+
+      trivy config \
+        --severity HIGH,CRITICAL \
+        --exit-code 1 \
+        infrastructure
+    displayName: Trivy IaC security scan
+
+  - bash: |
+      set -euo pipefail
+
+      if git ls-files | grep -E \
+        '(^|/)(terraform\.tfstate|terraform\.tfstate\.backup)$|\.tfplan$|(^|/)\.terraform/'; then
+        echo "ERROR: Terraform runtime artifacts are tracked by Git."
+        exit 1
+      fi
+
+      echo "No Terraform state, plan or .terraform artifacts are tracked."
+    displayName: Repository artifact hygiene
