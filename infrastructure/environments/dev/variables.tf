@@ -47,3 +47,12 @@ variable "invoice_storage_account_name" {
     error_message = "Storage account name must contain 3-24 lowercase letters and numbers only."
   }
 }
+variable "function_app_name" {
+  description = "DEV Azure Function App name."
+  type        = string
+}
+
+variable "function_service_plan_name" {
+  description = "DEV Function App service plan name."
+  type        = string
+}

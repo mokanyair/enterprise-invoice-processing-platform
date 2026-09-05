@@ -34,3 +34,24 @@ module "invoice_storage" {
     module.resource_groups
   ]
 }
+
+module "invoice_function" {
+  source = "../../modules/function-app"
+
+  function_app_name   = var.function_app_name
+  service_plan_name   = var.function_service_plan_name
+  resource_group_name = module.resource_groups["application"].name
+  location            = var.location
+
+  storage_account_name       = module.invoice_storage.name
+  storage_account_access_key = module.invoice_storage.primary_access_key
+
+  invoice_storage_connection_string = module.invoice_storage.primary_connection_string
+
+  tags = merge(
+    local.common_tags,
+    {
+      purpose = "invoice-processing-function"
+    }
+  )
+}

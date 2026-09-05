@@ -21,3 +21,12 @@ output "invoice_storage" {
     containers            = module.invoice_storage.container_names
   }
 }
+
+output "invoice_function" {
+  value = {
+    id               = module.invoice_function.id
+    name             = module.invoice_function.name
+    default_hostname = module.invoice_function.default_hostname
+    principal_id     = module.invoice_function.principal_id
+  }
+}

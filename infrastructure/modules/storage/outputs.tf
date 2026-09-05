@@ -17,3 +17,15 @@ output "container_names" {
   description = "Blob containers created by the module."
   value       = sort(tolist(var.containers))
 }
+
+output "primary_access_key" {
+  description = "Primary Storage Account access key."
+  value       = azurerm_storage_account.this.primary_access_key
+  sensitive   = true
+}
+
+output "primary_connection_string" {
+  description = "Primary Storage Account connection string."
+  value       = azurerm_storage_account.this.primary_connection_string
+  sensitive   = true
+}

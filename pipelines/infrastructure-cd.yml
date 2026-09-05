@@ -5,6 +5,8 @@ trigger:
   paths:
     include:
       - infrastructure/**
+      - src/**
+      - tests/**
       - pipelines/infrastructure-cd.yml
 
 pr: none
@@ -14,14 +16,23 @@ pool:
 
 variables:
   TF_VERSION: '1.16.1'
+  PYTHON_VERSION: '3.12'
 
   AZURE_SERVICE_CONNECTION: 'eipp-azure-wif'
 
+  FUNCTION_SOURCE: 'src/invoice_processor'
+  FUNCTION_PACKAGE: 'eipp-function.zip'
+
   DEV_ROOT: 'infrastructure/environments/dev'
   DEV_PLAN: 'eipp-dev.tfplan'
+  DEV_FUNCTION_APP: 'func-eipp-dev-cus-2978a89b'
+  DEV_RESOURCE_GROUP: 'rg-eipp-dev-app-cus'
 
   PROD_ROOT: 'infrastructure/environments/prod'
   PROD_PLAN: 'eipp-prod.tfplan'
+  PROD_FUNCTION_APP: 'func-eipp-prod-cus-2978a89b'
+  PROD_RESOURCE_GROUP: 'rg-eipp-prod-app-cus'
+
 
 stages:
 
@@ -30,15 +41,42 @@ stages:
 # ============================================================
 
 - stage: Validate
-  displayName: Validate Terraform
+  displayName: Validate Application and Terraform
 
   jobs:
-    - job: TerraformValidation
-      displayName: Terraform validation
+
+    - job: Validation
+      displayName: Validate application and infrastructure
 
       steps:
+
         - checkout: self
           clean: true
+
+        - task: UsePythonVersion@0
+          displayName: Use Python $(PYTHON_VERSION)
+          inputs:
+            versionSpec: '$(PYTHON_VERSION)'
+            addToPath: true
+
+        - bash: |
+            set -euo pipefail
+
+            python --version
+            python -m pip install --upgrade pip
+
+            python -m pip install \
+              -r "$(Build.SourcesDirectory)/$(FUNCTION_SOURCE)/requirements.txt"
+
+            python -m pip install pytest
+
+            python -m pytest \
+              "$(Build.SourcesDirectory)/tests" \
+              -v
+
+            python -m compileall \
+              "$(Build.SourcesDirectory)/$(FUNCTION_SOURCE)"
+          displayName: Validate Function application
 
         - bash: |
             set -euo pipefail
@@ -83,20 +121,98 @@ stages:
 
 
 # ============================================================
+# BUILD FUNCTION ONCE
+# ============================================================
+
+- stage: BuildFunction
+  displayName: Build Azure Function Package
+
+  dependsOn: Validate
+  condition: succeeded()
+
+  jobs:
+
+    - job: PackageFunction
+      displayName: Package Azure Function
+
+      steps:
+
+        - checkout: self
+          clean: true
+
+        - task: UsePythonVersion@0
+          displayName: Use Python $(PYTHON_VERSION)
+          inputs:
+            versionSpec: '$(PYTHON_VERSION)'
+            addToPath: true
+
+        - bash: |
+            set -euo pipefail
+
+            sudo apt-get update -qq
+            sudo apt-get install -y zip unzip
+
+            PACKAGE_ROOT="$(Build.ArtifactStagingDirectory)/function"
+
+            mkdir -p "$PACKAGE_ROOT"
+
+            cp -R \
+              "$(Build.SourcesDirectory)/$(FUNCTION_SOURCE)/." \
+              "$PACKAGE_ROOT/"
+
+            python -m pip install --upgrade pip
+
+            python -m pip install \
+              --target "$PACKAGE_ROOT/.python_packages/lib/site-packages" \
+              -r "$PACKAGE_ROOT/requirements.txt"
+
+            test -f "$PACKAGE_ROOT/host.json"
+            test -f "$PACKAGE_ROOT/function_app.py"
+            test -f "$PACKAGE_ROOT/processor.py"
+
+            cd "$PACKAGE_ROOT"
+
+            zip -qr \
+              "$(Build.ArtifactStagingDirectory)/$(FUNCTION_PACKAGE)" \
+              .
+
+            echo "=========================================="
+            echo "Function package validation"
+            echo "=========================================="
+
+            unzip -l \
+              "$(Build.ArtifactStagingDirectory)/$(FUNCTION_PACKAGE)" \
+              | head -80
+          displayName: Build Function deployment package
+
+        - publish: $(Build.ArtifactStagingDirectory)/$(FUNCTION_PACKAGE)
+          artifact: function-package
+          displayName: Publish Azure Function package
+
+
+# ============================================================
 # DEV PLAN
 # ============================================================
 
 - stage: DevPlan
   displayName: DEV Terraform Plan
 
-  dependsOn: Validate
-  condition: succeeded()
+  dependsOn:
+    - Validate
+    - BuildFunction
+
+  condition: and(
+    succeeded('Validate'),
+    succeeded('BuildFunction')
+    )
 
   jobs:
+
     - job: TerraformPlan
       displayName: Plan DEV infrastructure
 
       steps:
+
         - checkout: self
           clean: true
 
@@ -170,7 +286,7 @@ stages:
   jobs:
 
     - deployment: ApplyDev
-      displayName: Apply DEV Terraform
+      displayName: Apply DEV Terraform and Function
 
       environment: eipp-dev
 
@@ -185,6 +301,9 @@ stages:
 
               - download: current
                 artifact: dev-terraform-plan
+
+              - download: current
+                artifact: function-package
 
               - bash: |
                   set -euo pipefail
@@ -234,6 +353,34 @@ stages:
                       -auto-approve \
                       "$(DEV_PLAN)"
 
+              - task: AzureCLI@2
+                displayName: Deploy Azure Function to DEV
+
+                inputs:
+                  azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                  scriptType: bash
+                  scriptLocation: inlineScript
+
+                  inlineScript: |
+                    set -euo pipefail
+
+                    FUNCTION_ZIP="$(Pipeline.Workspace)/function-package/$(FUNCTION_PACKAGE)"
+
+                    test -f "$FUNCTION_ZIP"
+
+                    az functionapp show \
+                      --name "$(DEV_FUNCTION_APP)" \
+                      --resource-group "$(DEV_RESOURCE_GROUP)" \
+                      --query "{Name:name,State:state}" \
+                      -o table
+
+                    az functionapp deployment source config-zip \
+                      --name "$(DEV_FUNCTION_APP)" \
+                      --resource-group "$(DEV_RESOURCE_GROUP)" \
+                      --src "$FUNCTION_ZIP"
+
+                    echo "DEV Function deployment completed."
+
 
 # ============================================================
 # DEV VERIFY
@@ -268,7 +415,7 @@ stages:
               echo "=========================================="
 
               az group show \
-                --name rg-eipp-dev-app-cus \
+                --name "$(DEV_RESOURCE_GROUP)" \
                 --query "{Name:name,Location:location}" \
                 -o table
 
@@ -283,7 +430,7 @@ stages:
 
               az storage account show \
                 --name steippdevdata2978a89b \
-                --resource-group rg-eipp-dev-app-cus \
+                --resource-group "$(DEV_RESOURCE_GROUP)" \
                 --query "{
                   Name:name,
                   Location:location,
@@ -292,6 +439,32 @@ stages:
                   PublicAccess:allowBlobPublicAccess
                 }" \
                 -o table
+
+              echo "=========================================="
+              echo "Validating DEV Function App"
+              echo "=========================================="
+
+              az functionapp show \
+                --name "$(DEV_FUNCTION_APP)" \
+                --resource-group "$(DEV_RESOURCE_GROUP)" \
+                --query "{
+                  Name:name,
+                  State:state,
+                  HTTPSOnly:httpsOnly,
+                  Hostname:defaultHostName
+                }" \
+                -o table
+
+              DEV_FUNCTION_STATE=$(az functionapp show \
+                --name "$(DEV_FUNCTION_APP)" \
+                --resource-group "$(DEV_RESOURCE_GROUP)" \
+                --query state \
+                -o tsv)
+
+              if [ "$DEV_FUNCTION_STATE" != "Running" ]; then
+                echo "ERROR: DEV Function App is not running."
+                exit 1
+              fi
 
               echo "DEV deployment validation successful."
 
@@ -375,7 +548,6 @@ stages:
 
 # ============================================================
 # PROD DEPLOY
-# Approval is controlled by Azure DevOps environment eipp-prod
 # ============================================================
 
 - stage: ProdDeploy
@@ -387,7 +559,7 @@ stages:
   jobs:
 
     - deployment: ApplyProd
-      displayName: Apply PROD Terraform
+      displayName: Apply PROD Terraform and Function
 
       environment: eipp-prod
 
@@ -402,6 +574,9 @@ stages:
 
               - download: current
                 artifact: prod-terraform-plan
+
+              - download: current
+                artifact: function-package
 
               - bash: |
                   set -euo pipefail
@@ -451,6 +626,34 @@ stages:
                       -auto-approve \
                       "$(PROD_PLAN)"
 
+              - task: AzureCLI@2
+                displayName: Deploy Azure Function to PROD
+
+                inputs:
+                  azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                  scriptType: bash
+                  scriptLocation: inlineScript
+
+                  inlineScript: |
+                    set -euo pipefail
+
+                    FUNCTION_ZIP="$(Pipeline.Workspace)/function-package/$(FUNCTION_PACKAGE)"
+
+                    test -f "$FUNCTION_ZIP"
+
+                    az functionapp show \
+                      --name "$(PROD_FUNCTION_APP)" \
+                      --resource-group "$(PROD_RESOURCE_GROUP)" \
+                      --query "{Name:name,State:state}" \
+                      -o table
+
+                    az functionapp deployment source config-zip \
+                      --name "$(PROD_FUNCTION_APP)" \
+                      --resource-group "$(PROD_RESOURCE_GROUP)" \
+                      --src "$FUNCTION_ZIP"
+
+                    echo "PROD Function deployment completed."
+
 
 # ============================================================
 # PROD VERIFY
@@ -485,7 +688,7 @@ stages:
               echo "=========================================="
 
               az group show \
-                --name rg-eipp-prod-app-cus \
+                --name "$(PROD_RESOURCE_GROUP)" \
                 --query "{Name:name,Location:location}" \
                 -o table
 
@@ -500,7 +703,7 @@ stages:
 
               az storage account show \
                 --name steippproddata2978a89b \
-                --resource-group rg-eipp-prod-app-cus \
+                --resource-group "$(PROD_RESOURCE_GROUP)" \
                 --query "{
                   Name:name,
                   Location:location,
@@ -509,5 +712,31 @@ stages:
                   PublicAccess:allowBlobPublicAccess
                 }" \
                 -o table
+
+              echo "=========================================="
+              echo "Validating PROD Function App"
+              echo "=========================================="
+
+              az functionapp show \
+                --name "$(PROD_FUNCTION_APP)" \
+                --resource-group "$(PROD_RESOURCE_GROUP)" \
+                --query "{
+                  Name:name,
+                  State:state,
+                  HTTPSOnly:httpsOnly,
+                  Hostname:defaultHostName
+                }" \
+                -o table
+
+              PROD_FUNCTION_STATE=$(az functionapp show \
+                --name "$(PROD_FUNCTION_APP)" \
+                --resource-group "$(PROD_RESOURCE_GROUP)" \
+                --query state \
+                -o tsv)
+
+              if [ "$PROD_FUNCTION_STATE" != "Running" ]; then
+                echo "ERROR: PROD Function App is not running."
+                exit 1
+              fi
 
               echo "PROD deployment validation successful."
