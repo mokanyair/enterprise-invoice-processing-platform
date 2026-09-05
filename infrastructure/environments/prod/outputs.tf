@@ -10,3 +10,14 @@ output "resource_groups" {
     }
   }
 }
+
+output "invoice_storage" {
+  description = "PROD invoice-processing Blob Storage configuration."
+
+  value = {
+    id                    = module.invoice_storage.id
+    name                  = module.invoice_storage.name
+    primary_blob_endpoint = module.invoice_storage.primary_blob_endpoint
+    containers            = module.invoice_storage.container_names
+  }
+}
