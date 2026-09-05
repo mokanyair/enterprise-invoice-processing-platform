@@ -48,3 +48,13 @@ variable "invoice_storage_account_name" {
   }
 }
 
+
+variable "function_app_name" {
+  description = "Azure Function App name."
+  type        = string
+}
+
+variable "function_service_plan_name" {
+  description = "Azure Function App service plan name."
+  type        = string
+}

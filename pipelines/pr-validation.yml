@@ -6,6 +6,12 @@ pr:
   branches:
     include:
       - main
+  paths:
+    include:
+      - infrastructure/**
+      - src/**
+      - tests/**
+      - pipelines/pr-validation.yml
 
 pool:
   vmImage: ubuntu-latest
@@ -14,102 +20,207 @@ variables:
   TF_VERSION: '1.16.1'
   TFLINT_VERSION: 'v0.64.0'
   TRIVY_VERSION: 'v0.74.0'
+  PYTHON_VERSION: '3.12'
 
 steps:
-  - checkout: self
-    clean: true
-    fetchDepth: 0
 
-  - bash: |
-      set -euo pipefail
+# ============================================================
+# CHECKOUT
+# ============================================================
 
-      sudo apt-get update -qq
-      sudo apt-get install -y unzip
+- checkout: self
+  clean: true
+  fetchDepth: 0
 
-      curl -fsSLo terraform.zip \
-        "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
 
-      unzip -q terraform.zip
-      sudo install terraform /usr/local/bin/terraform
+# ============================================================
+# PYTHON VALIDATION
+# ============================================================
 
-      terraform version
-    displayName: Install Terraform
+- task: UsePythonVersion@0
+  displayName: Use Python $(PYTHON_VERSION)
+  inputs:
+    versionSpec: '$(PYTHON_VERSION)'
+    addToPath: true
 
-  - bash: |
-      set -euo pipefail
+- bash: |
+    set -euo pipefail
 
-      curl -fsSLo tflint.zip \
-        "https://github.com/terraform-linters/tflint/releases/download/$(TFLINT_VERSION)/tflint_linux_amd64.zip"
+    python --version
+    python -m pip install --upgrade pip
 
-      unzip -q tflint.zip
-      sudo install tflint /usr/local/bin/tflint
+    python -m pip install \
+      -r "$(Build.SourcesDirectory)/src/invoice_processor/requirements.txt"
 
-      tflint --version
-    displayName: Install TFLint
+    python -m pip install pytest
+  displayName: Install Python dependencies
 
-  - bash: |
-      set -euo pipefail
+- bash: |
+    set -euo pipefail
 
-      curl -sfL \
-        https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-        | sudo sh -s -- -b /usr/local/bin $(TRIVY_VERSION)
+    python -m pytest \
+      "$(Build.SourcesDirectory)/tests" \
+      -v \
+      --junitxml="$(Build.ArtifactStagingDirectory)/pytest-results.xml"
+  displayName: Python unit tests
 
-      trivy --version
-    displayName: Install Trivy
+- task: PublishTestResults@2
+  displayName: Publish Python test results
+  condition: succeededOrFailed()
+  inputs:
+    testResultsFormat: JUnit
+    testResultsFiles: '$(Build.ArtifactStagingDirectory)/pytest-results.xml'
+    testRunTitle: 'EIPP Python Unit Tests'
+    failTaskOnFailedTests: true
 
-  - bash: |
-      set -euo pipefail
+- bash: |
+    set -euo pipefail
 
-      terraform fmt -check -recursive infrastructure
-    displayName: Terraform format check
+    python -m compileall \
+      "$(Build.SourcesDirectory)/src/invoice_processor"
+  displayName: Python syntax validation
 
-  - bash: |
-      set -euo pipefail
 
-      ROOTS=(
-        "infrastructure/bootstrap"
-        "infrastructure/environments/dev"
-        "infrastructure/environments/prod"
-      )
+# ============================================================
+# TERRAFORM INSTALL
+# ============================================================
 
-      for ROOT in "${ROOTS[@]}"; do
-        echo "========================================"
-        echo "Validating ${ROOT}"
-        echo "========================================"
+- bash: |
+    set -euo pipefail
 
-        terraform -chdir="$ROOT" init \
-          -backend=false \
-          -input=false
+    sudo apt-get update -qq
+    sudo apt-get install -y unzip
 
-        terraform -chdir="$ROOT" validate
-      done
-    displayName: Terraform validate
+    curl -fsSLo terraform.zip \
+      "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
 
-  - bash: |
-      set -euo pipefail
+    unzip -q terraform.zip
+    sudo install terraform /usr/local/bin/terraform
 
-      tflint --recursive \
-        --chdir infrastructure \
-        --format compact
-    displayName: TFLint
+    terraform version
+  displayName: Install Terraform
 
-  - bash: |
-      set -euo pipefail
 
-      trivy config \
-        --severity HIGH,CRITICAL \
-        --exit-code 1 \
-        infrastructure
-    displayName: Trivy IaC security scan
+# ============================================================
+# TFLINT INSTALL
+# ============================================================
 
-  - bash: |
-      set -euo pipefail
+- bash: |
+    set -euo pipefail
 
-      if git ls-files | grep -E \
-        '(^|/)(terraform\.tfstate|terraform\.tfstate\.backup)$|\.tfplan$|(^|/)\.terraform/'; then
-        echo "ERROR: Terraform runtime artifacts are tracked by Git."
+    curl -fsSLo tflint.zip \
+      "https://github.com/terraform-linters/tflint/releases/download/$(TFLINT_VERSION)/tflint_linux_amd64.zip"
+
+    unzip -q tflint.zip
+    sudo install tflint /usr/local/bin/tflint
+
+    tflint --version
+  displayName: Install TFLint
+
+
+# ============================================================
+# TRIVY INSTALL
+# ============================================================
+
+- bash: |
+    set -euo pipefail
+
+    curl -sfL \
+      https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+      | sudo sh -s -- -b /usr/local/bin $(TRIVY_VERSION)
+
+    trivy --version
+  displayName: Install Trivy
+
+
+# ============================================================
+# TERRAFORM FORMAT
+# ============================================================
+
+- bash: |
+    set -euo pipefail
+
+    terraform fmt -check -recursive \
+      "$(Build.SourcesDirectory)/infrastructure"
+  displayName: Terraform format check
+
+
+# ============================================================
+# TERRAFORM VALIDATE
+# ============================================================
+
+- bash: |
+    set -euo pipefail
+
+    ROOTS=(
+      "infrastructure/bootstrap"
+      "infrastructure/environments/dev"
+      "infrastructure/environments/prod"
+    )
+
+    for ROOT in "${ROOTS[@]}"
+    do
+      TF_ROOT="$(Build.SourcesDirectory)/${ROOT}"
+
+      echo "=========================================="
+      echo "Validating ${TF_ROOT}"
+      echo "=========================================="
+
+      if [ ! -d "$TF_ROOT" ]; then
+        echo "ERROR: Terraform root does not exist: $TF_ROOT"
         exit 1
       fi
 
-      echo "No Terraform state, plan or .terraform artifacts are tracked."
-    displayName: Repository artifact hygiene
+      terraform -chdir="$TF_ROOT" init \
+        -backend=false \
+        -input=false
+
+      terraform -chdir="$TF_ROOT" validate
+    done
+  displayName: Terraform validate
+
+
+# ============================================================
+# TFLINT
+# ============================================================
+
+- bash: |
+    set -euo pipefail
+
+    tflint \
+      --recursive \
+      --chdir "$(Build.SourcesDirectory)/infrastructure" \
+      --format compact
+  displayName: TFLint
+
+
+# ============================================================
+# TRIVY
+# ============================================================
+
+- bash: |
+    set -euo pipefail
+
+    trivy config \
+      --severity HIGH,CRITICAL \
+      --exit-code 1 \
+      "$(Build.SourcesDirectory)/infrastructure"
+  displayName: Trivy IaC security scan
+
+
+# ============================================================
+# REPOSITORY HYGIENE
+# ============================================================
+
+- bash: |
+    set -euo pipefail
+
+    if git ls-files | grep -E \
+      '(^|/)(terraform\.tfstate|terraform\.tfstate\.backup)$|\.tfplan$|(^|/)\.terraform/'
+    then
+      echo "ERROR: Terraform runtime artifacts are tracked by Git."
+      exit 1
+    fi
+
+    echo "Terraform repository hygiene validated."
+  displayName: Repository artifact hygiene
