@@ -1,3 +1,8 @@
+# Temporary exception for AVD-AZU-0012:
+# The current Azure Function uses the Consumption plan, which requires
+# publicly reachable runtime storage. Network isolation will be implemented
+# with VNet integration/private endpoints during the security-hardening phase.
+#trivy:ignore:AVD-AZU-0012
 resource "azurerm_storage_account" "this" {
   name                     = var.name
   resource_group_name      = var.resource_group_name
