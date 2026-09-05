@@ -14,217 +14,500 @@ pool:
 
 variables:
   TF_VERSION: '1.16.1'
+
   AZURE_SERVICE_CONNECTION: 'eipp-azure-wif'
+
   DEV_ROOT: 'infrastructure/environments/dev'
   DEV_PLAN: 'eipp-dev.tfplan'
 
+  PROD_ROOT: 'infrastructure/environments/prod'
+  PROD_PLAN: 'eipp-prod.tfplan'
+
 stages:
 
-  - stage: Validate
-    displayName: Validate Terraform
-    jobs:
-      - job: TerraformValidation
-        displayName: Terraform validation
-        steps:
-          - checkout: self
-            clean: true
+# ============================================================
+# VALIDATE
+# ============================================================
 
-          - bash: |
-              set -euo pipefail
+- stage: Validate
+  displayName: Validate Terraform
 
-              sudo apt-get update -qq
-              sudo apt-get install -y unzip
+  jobs:
+    - job: TerraformValidation
+      displayName: Terraform validation
 
-              curl -fsSLo terraform.zip \
-                "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+      steps:
+        - checkout: self
+          clean: true
 
-              unzip -q terraform.zip
-              sudo install terraform /usr/local/bin/terraform
+        - bash: |
+            set -euo pipefail
 
-              terraform version
-            displayName: Install Terraform
+            sudo apt-get update -qq
+            sudo apt-get install -y unzip
 
-          - bash: |
-              set -euo pipefail
-              terraform fmt -check -recursive infrastructure
-            displayName: Terraform format check
+            curl -fsSLo terraform.zip \
+              "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
 
-          - bash: |
-              set -euo pipefail
+            unzip -q terraform.zip
+            sudo install terraform /usr/local/bin/terraform
 
-              terraform -chdir="$(DEV_ROOT)" init \
+            terraform version
+          displayName: Install Terraform
+
+        - bash: |
+            set -euo pipefail
+
+            terraform fmt -check -recursive \
+              "$(Build.SourcesDirectory)/infrastructure"
+          displayName: Terraform format check
+
+        - bash: |
+            set -euo pipefail
+
+            for ROOT in \
+              "$(Build.SourcesDirectory)/$(DEV_ROOT)" \
+              "$(Build.SourcesDirectory)/$(PROD_ROOT)"
+            do
+              echo "=========================================="
+              echo "Validating $ROOT"
+              echo "=========================================="
+
+              terraform -chdir="$ROOT" init \
                 -backend=false \
                 -input=false
 
-              terraform -chdir="$(DEV_ROOT)" validate
-            displayName: Terraform validate
+              terraform -chdir="$ROOT" validate
+            done
+          displayName: Terraform validate
 
-  - stage: DevPlan
-    displayName: DEV Terraform Plan
-    dependsOn: Validate
-    condition: succeeded()
-    jobs:
-      - job: TerraformPlan
-        displayName: Plan DEV infrastructure
-        steps:
-          - checkout: self
-            clean: true
 
-          - bash: |
+# ============================================================
+# DEV PLAN
+# ============================================================
+
+- stage: DevPlan
+  displayName: DEV Terraform Plan
+
+  dependsOn: Validate
+  condition: succeeded()
+
+  jobs:
+    - job: TerraformPlan
+      displayName: Plan DEV infrastructure
+
+      steps:
+        - checkout: self
+          clean: true
+
+        - bash: |
+            set -euo pipefail
+
+            sudo apt-get update -qq
+            sudo apt-get install -y unzip
+
+            curl -fsSLo terraform.zip \
+              "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+
+            unzip -q terraform.zip
+            sudo install terraform /usr/local/bin/terraform
+          displayName: Install Terraform
+
+        - task: AzureCLI@2
+          displayName: Terraform init and plan DEV using WIF
+
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION)
+            scriptType: bash
+            scriptLocation: inlineScript
+            addSpnToEnvironment: true
+
+            inlineScript: |
               set -euo pipefail
 
-              sudo apt-get update -qq
-              sudo apt-get install -y unzip
+              export ARM_USE_OIDC=true
+              export ARM_USE_AZUREAD=true
+              export ARM_CLIENT_ID="$servicePrincipalId"
+              export ARM_TENANT_ID="$tenantId"
+              export ARM_OIDC_TOKEN="$idToken"
+              export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 
-              curl -fsSLo terraform.zip \
-                "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+              DEV_PATH="$(Build.SourcesDirectory)/$(DEV_ROOT)"
 
-              unzip -q terraform.zip
-              sudo install terraform /usr/local/bin/terraform
-            displayName: Install Terraform
+              terraform -chdir="$DEV_PATH" init \
+                -reconfigure \
+                -input=false \
+                -backend-config=backend.hcl
 
-          - task: AzureCLI@2
-            displayName: Terraform init and plan using WIF
-            inputs:
-              azureSubscription: $(AZURE_SERVICE_CONNECTION)
-              scriptType: bash
-              scriptLocation: inlineScript
-              addSpnToEnvironment: true
-              inlineScript: |
-                set -euo pipefail
+              terraform -chdir="$DEV_PATH" plan \
+                -input=false \
+                -out="$(DEV_PLAN)"
 
-                export ARM_USE_OIDC=true
-                export ARM_USE_AZUREAD=true
-                export ARM_CLIENT_ID="$servicePrincipalId"
-                export ARM_TENANT_ID="$tenantId"
-                export ARM_OIDC_TOKEN="$idToken"
-                export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+              terraform -chdir="$DEV_PATH" show \
+                -no-color \
+                "$(DEV_PLAN)" \
+                > "$(Build.ArtifactStagingDirectory)/eipp-dev-plan.txt"
 
-                terraform -chdir="$(DEV_ROOT)" init \
-                  -reconfigure \
-                  -input=false \
-                  -backend-config=backend.hcl
+              cp \
+                "$DEV_PATH/$(DEV_PLAN)" \
+                "$(Build.ArtifactStagingDirectory)/$(DEV_PLAN)"
 
-                terraform -chdir="$(DEV_ROOT)" plan \
-                  -input=false \
-                  -out="$(DEV_PLAN)"
+        - publish: $(Build.ArtifactStagingDirectory)
+          artifact: dev-terraform-plan
+          displayName: Publish DEV Terraform plan
 
-                terraform -chdir="$(DEV_ROOT)" show \
-                  -no-color \
-                  "$(DEV_PLAN)" \
-                  > "$(Build.ArtifactStagingDirectory)/eipp-dev-plan.txt"
 
-                cp \
-                  "$(DEV_ROOT)/$(DEV_PLAN)" \
-                  "$(Build.ArtifactStagingDirectory)/$(DEV_PLAN)"
+# ============================================================
+# DEV DEPLOY
+# ============================================================
 
-          - publish: $(Build.ArtifactStagingDirectory)
-            artifact: dev-terraform-plan
-            displayName: Publish DEV Terraform plan
+- stage: DevDeploy
+  displayName: Deploy DEV
 
-  - stage: DevDeploy
-    displayName: Deploy DEV
-    dependsOn: DevPlan
-    condition: succeeded()
-    jobs:
-      - deployment: ApplyDev
-        displayName: Apply DEV Terraform
-        environment: eipp-dev
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: self
-                  clean: true
+  dependsOn: DevPlan
+  condition: succeeded()
 
-                - download: current
-                  artifact: dev-terraform-plan
+  jobs:
 
-                - bash: |
+    - deployment: ApplyDev
+      displayName: Apply DEV Terraform
+
+      environment: eipp-dev
+
+      strategy:
+        runOnce:
+          deploy:
+
+            steps:
+
+              - checkout: self
+                clean: true
+
+              - download: current
+                artifact: dev-terraform-plan
+
+              - bash: |
+                  set -euo pipefail
+
+                  sudo apt-get update -qq
+                  sudo apt-get install -y unzip
+
+                  curl -fsSLo terraform.zip \
+                    "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+
+                  unzip -q terraform.zip
+                  sudo install terraform /usr/local/bin/terraform
+                displayName: Install Terraform
+
+              - task: AzureCLI@2
+                displayName: Terraform apply DEV
+
+                inputs:
+                  azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                  scriptType: bash
+                  scriptLocation: inlineScript
+                  addSpnToEnvironment: true
+
+                  inlineScript: |
                     set -euo pipefail
 
-                    sudo apt-get update -qq
-                    sudo apt-get install -y unzip
+                    export ARM_USE_OIDC=true
+                    export ARM_USE_AZUREAD=true
+                    export ARM_CLIENT_ID="$servicePrincipalId"
+                    export ARM_TENANT_ID="$tenantId"
+                    export ARM_OIDC_TOKEN="$idToken"
+                    export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
 
-                    curl -fsSLo terraform.zip \
-                      "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+                    DEV_PATH="$(Build.SourcesDirectory)/$(DEV_ROOT)"
 
-                    unzip -q terraform.zip
-                    sudo install terraform /usr/local/bin/terraform
-                  displayName: Install Terraform
+                    terraform -chdir="$DEV_PATH" init \
+                      -reconfigure \
+                      -input=false \
+                      -backend-config=backend.hcl
 
-                - task: AzureCLI@2
-                  displayName: Terraform apply DEV
-                  inputs:
-                    azureSubscription: $(AZURE_SERVICE_CONNECTION)
-                    scriptType: bash
-                    scriptLocation: inlineScript
-                    addSpnToEnvironment: true
-                    inlineScript: |
-                      set -euo pipefail
+                    cp \
+                      "$(Pipeline.Workspace)/dev-terraform-plan/$(DEV_PLAN)" \
+                      "$DEV_PATH/$(DEV_PLAN)"
 
-                      export ARM_USE_OIDC=true
-                      export ARM_USE_AZUREAD=true
-                      export ARM_CLIENT_ID="$servicePrincipalId"
-                      export ARM_TENANT_ID="$tenantId"
-                      export ARM_OIDC_TOKEN="$idToken"
-                      export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+                    terraform -chdir="$DEV_PATH" apply \
+                      -input=false \
+                      -auto-approve \
+                      "$(DEV_PLAN)"
 
-                      terraform -chdir="$(DEV_ROOT)" init \
-                        -reconfigure \
-                        -input=false \
-                        -backend-config=backend.hcl
 
-                      cp \
-                        "$(Pipeline.Workspace)/dev-terraform-plan/$(DEV_PLAN)" \
-                        "$(DEV_ROOT)/$(DEV_PLAN)"
+# ============================================================
+# DEV VERIFY
+# ============================================================
 
-                      terraform -chdir="$(DEV_ROOT)" apply \
-                        -input=false \
-                        -auto-approve \
-                        "$(DEV_PLAN)"
+- stage: DevVerify
+  displayName: Validate DEV Deployment
 
-  - stage: DevVerify
-    displayName: Validate DEV Deployment
-    dependsOn: DevDeploy
-    condition: succeeded()
-    jobs:
-      - job: VerifyDev
-        displayName: Verify deployed foundation
-        steps:
-          - task: AzureCLI@2
-            displayName: Validate DEV Azure resources
-            inputs:
-              azureSubscription: $(AZURE_SERVICE_CONNECTION)
-              scriptType: bash
-              scriptLocation: inlineScript
-              inlineScript: |
-                set -euo pipefail
+  dependsOn: DevDeploy
+  condition: succeeded()
 
-                az group show \
-                  --name rg-eipp-dev-app-cus \
-                  --query "{Name:name,Location:location}" \
-                  -o table
+  jobs:
 
-                az group show \
-                  --name rg-eipp-dev-obs-cus \
-                  --query "{Name:name,Location:location}" \
-                  -o table
+    - job: VerifyDev
+      displayName: Verify DEV resources
 
-                echo "DEV deployment validation successful."
+      steps:
 
-  - stage: ProdPlan
-    displayName: PROD Terraform Plan
-    dependsOn: DevVerify
+        - task: AzureCLI@2
+          displayName: Validate DEV Azure resources
 
-    # PROD intentionally disabled during current implementation phase.
-    condition: and(succeeded(), eq(variables['ENABLE_PROD'], 'true'))
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION)
+            scriptType: bash
+            scriptLocation: inlineScript
 
-    jobs:
-      - job: TerraformProdPlan
-        displayName: Plan PROD infrastructure
-        steps:
-          - bash: |
-              echo "PROD pipeline foundation is configured."
-              echo "Deployment remains intentionally disabled."
-            displayName: PROD deployment disabled
+            inlineScript: |
+              set -euo pipefail
+
+              echo "=========================================="
+              echo "Validating DEV Resource Groups"
+              echo "=========================================="
+
+              az group show \
+                --name rg-eipp-dev-app-cus \
+                --query "{Name:name,Location:location}" \
+                -o table
+
+              az group show \
+                --name rg-eipp-dev-obs-cus \
+                --query "{Name:name,Location:location}" \
+                -o table
+
+              echo "=========================================="
+              echo "Validating DEV Storage Account"
+              echo "=========================================="
+
+              az storage account show \
+                --name steippdevdata2978a89b \
+                --resource-group rg-eipp-dev-app-cus \
+                --query "{
+                  Name:name,
+                  Location:location,
+                  HTTPS:enableHttpsTrafficOnly,
+                  TLS:minimumTlsVersion,
+                  PublicAccess:allowBlobPublicAccess
+                }" \
+                -o table
+
+              echo "DEV deployment validation successful."
+
+
+# ============================================================
+# PROD PLAN
+# ============================================================
+
+- stage: ProdPlan
+  displayName: PROD Terraform Plan
+
+  dependsOn: DevVerify
+  condition: succeeded()
+
+  jobs:
+
+    - job: TerraformProdPlan
+      displayName: Plan PROD infrastructure
+
+      steps:
+
+        - checkout: self
+          clean: true
+
+        - bash: |
+            set -euo pipefail
+
+            sudo apt-get update -qq
+            sudo apt-get install -y unzip
+
+            curl -fsSLo terraform.zip \
+              "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+
+            unzip -q terraform.zip
+            sudo install terraform /usr/local/bin/terraform
+          displayName: Install Terraform
+
+        - task: AzureCLI@2
+          displayName: Terraform init and plan PROD using WIF
+
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION)
+            scriptType: bash
+            scriptLocation: inlineScript
+            addSpnToEnvironment: true
+
+            inlineScript: |
+              set -euo pipefail
+
+              export ARM_USE_OIDC=true
+              export ARM_USE_AZUREAD=true
+              export ARM_CLIENT_ID="$servicePrincipalId"
+              export ARM_TENANT_ID="$tenantId"
+              export ARM_OIDC_TOKEN="$idToken"
+              export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+
+              PROD_PATH="$(Build.SourcesDirectory)/$(PROD_ROOT)"
+
+              terraform -chdir="$PROD_PATH" init \
+                -reconfigure \
+                -input=false \
+                -backend-config=backend.hcl
+
+              terraform -chdir="$PROD_PATH" plan \
+                -input=false \
+                -out="$(PROD_PLAN)"
+
+              terraform -chdir="$PROD_PATH" show \
+                -no-color \
+                "$(PROD_PLAN)" \
+                > "$(Build.ArtifactStagingDirectory)/eipp-prod-plan.txt"
+
+              cp \
+                "$PROD_PATH/$(PROD_PLAN)" \
+                "$(Build.ArtifactStagingDirectory)/$(PROD_PLAN)"
+
+        - publish: $(Build.ArtifactStagingDirectory)
+          artifact: prod-terraform-plan
+          displayName: Publish PROD Terraform plan
+
+
+# ============================================================
+# PROD DEPLOY
+# Approval is controlled by Azure DevOps environment eipp-prod
+# ============================================================
+
+- stage: ProdDeploy
+  displayName: Deploy PROD
+
+  dependsOn: ProdPlan
+  condition: succeeded()
+
+  jobs:
+
+    - deployment: ApplyProd
+      displayName: Apply PROD Terraform
+
+      environment: eipp-prod
+
+      strategy:
+        runOnce:
+          deploy:
+
+            steps:
+
+              - checkout: self
+                clean: true
+
+              - download: current
+                artifact: prod-terraform-plan
+
+              - bash: |
+                  set -euo pipefail
+
+                  sudo apt-get update -qq
+                  sudo apt-get install -y unzip
+
+                  curl -fsSLo terraform.zip \
+                    "https://releases.hashicorp.com/terraform/$(TF_VERSION)/terraform_$(TF_VERSION)_linux_amd64.zip"
+
+                  unzip -q terraform.zip
+                  sudo install terraform /usr/local/bin/terraform
+                displayName: Install Terraform
+
+              - task: AzureCLI@2
+                displayName: Terraform apply PROD
+
+                inputs:
+                  azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                  scriptType: bash
+                  scriptLocation: inlineScript
+                  addSpnToEnvironment: true
+
+                  inlineScript: |
+                    set -euo pipefail
+
+                    export ARM_USE_OIDC=true
+                    export ARM_USE_AZUREAD=true
+                    export ARM_CLIENT_ID="$servicePrincipalId"
+                    export ARM_TENANT_ID="$tenantId"
+                    export ARM_OIDC_TOKEN="$idToken"
+                    export ARM_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"
+
+                    PROD_PATH="$(Build.SourcesDirectory)/$(PROD_ROOT)"
+
+                    terraform -chdir="$PROD_PATH" init \
+                      -reconfigure \
+                      -input=false \
+                      -backend-config=backend.hcl
+
+                    cp \
+                      "$(Pipeline.Workspace)/prod-terraform-plan/$(PROD_PLAN)" \
+                      "$PROD_PATH/$(PROD_PLAN)"
+
+                    terraform -chdir="$PROD_PATH" apply \
+                      -input=false \
+                      -auto-approve \
+                      "$(PROD_PLAN)"
+
+
+# ============================================================
+# PROD VERIFY
+# ============================================================
+
+- stage: ProdVerify
+  displayName: Validate PROD Deployment
+
+  dependsOn: ProdDeploy
+  condition: succeeded()
+
+  jobs:
+
+    - job: VerifyProd
+      displayName: Verify PROD resources
+
+      steps:
+
+        - task: AzureCLI@2
+          displayName: Validate PROD Azure resources
+
+          inputs:
+            azureSubscription: $(AZURE_SERVICE_CONNECTION)
+            scriptType: bash
+            scriptLocation: inlineScript
+
+            inlineScript: |
+              set -euo pipefail
+
+              echo "=========================================="
+              echo "Validating PROD Resource Groups"
+              echo "=========================================="
+
+              az group show \
+                --name rg-eipp-prod-app-cus \
+                --query "{Name:name,Location:location}" \
+                -o table
+
+              az group show \
+                --name rg-eipp-prod-obs-cus \
+                --query "{Name:name,Location:location}" \
+                -o table
+
+              echo "=========================================="
+              echo "Validating PROD Storage Account"
+              echo "=========================================="
+
+              az storage account show \
+                --name steippproddata2978a89b \
+                --resource-group rg-eipp-prod-app-cus \
+                --query "{
+                  Name:name,
+                  Location:location,
+                  HTTPS:enableHttpsTrafficOnly,
+                  TLS:minimumTlsVersion,
+                  PublicAccess:allowBlobPublicAccess
+                }" \
+                -o table
+
+              echo "PROD deployment validation successful."
