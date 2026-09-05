@@ -17,4 +17,8 @@ locals {
       name = "rg-${var.workload}-${var.environment}-obs-${var.location_short}"
     }
   }
+  invoice_containers = [
+    "raw",
+    "processed"
+  ]
 }
