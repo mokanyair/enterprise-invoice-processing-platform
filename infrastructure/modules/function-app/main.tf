@@ -34,6 +34,8 @@ resource "azurerm_linux_function_app" "this" {
   app_settings = {
     FUNCTIONS_WORKER_RUNTIME = "python"
     InvoiceStorage           = var.invoice_storage_connection_string
+    RAW_CONTAINER            = var.raw_container_name
+    PROCESSED_CONTAINER      = var.processed_container_name
   }
 
   tags = var.tags

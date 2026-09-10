@@ -1,3 +1,8 @@
+# Temporary security exception for AZU-0012.
+# This storage account supports the current Azure Functions Consumption-plan
+# implementation. Network isolation will be implemented in the security-
+# hardening phase using an appropriate VNet/private-endpoint architecture.
+#trivy:ignore:AZU-0012
 resource "azurerm_storage_account" "this" {
   name                     = var.name
   resource_group_name      = var.resource_group_name

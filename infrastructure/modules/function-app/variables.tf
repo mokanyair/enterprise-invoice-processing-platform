@@ -40,3 +40,15 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "raw_container_name" {
+  description = "Blob container that receives raw invoices."
+  type        = string
+  default     = "raw"
+}
+
+variable "processed_container_name" {
+  description = "Blob container that stores processed invoices."
+  type        = string
+  default     = "processed"
+}

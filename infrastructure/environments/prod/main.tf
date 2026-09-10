@@ -59,3 +59,31 @@ module "invoice_function" {
     }
   )
 }
+
+# ============================================================
+# EVENT GRID
+# ============================================================
+
+module "invoice_event_grid" {
+  source = "../../modules/event-grid"
+
+  system_topic_name       = var.eventgrid_system_topic_name
+  event_subscription_name = var.eventgrid_subscription_name
+
+  resource_group_name = module.resource_groups["application"].name
+  location            = var.location
+
+  storage_account_id = module.invoice_storage.id
+
+  function_app_id = module.invoice_function.id
+  function_name   = "invoice_processor"
+
+  raw_container_name = "raw"
+
+  tags = merge(
+    local.common_tags,
+    {
+      purpose = "invoice-ingestion-events"
+    }
+  )
+}
