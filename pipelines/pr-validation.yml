@@ -200,10 +200,24 @@ steps:
 - bash: |
     set -euo pipefail
 
+    echo "Scanning Terraform modules..."
     trivy config \
       --severity HIGH,CRITICAL \
       --exit-code 1 \
-      "$(Build.SourcesDirectory)/infrastructure"
+      "$(Build.SourcesDirectory)/infrastructure/modules"
+
+    echo "Scanning DEV environment..."
+    trivy config \
+      --severity HIGH,CRITICAL \
+      --exit-code 1 \
+      "$(Build.SourcesDirectory)/infrastructure/environments/dev"
+
+    echo "Scanning PROD environment..."
+    trivy config \
+      --severity HIGH,CRITICAL \
+      --exit-code 1 \
+      "$(Build.SourcesDirectory)/infrastructure/environments/prod"
+
   displayName: Trivy IaC security scan
 
 

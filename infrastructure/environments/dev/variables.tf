@@ -56,3 +56,13 @@ variable "function_service_plan_name" {
   description = "DEV Function App service plan name."
   type        = string
 }
+
+variable "eventgrid_system_topic_name" {
+  description = "DEV Event Grid system topic name."
+  type        = string
+}
+
+variable "eventgrid_subscription_name" {
+  description = "DEV Event Grid subscription name."
+  type        = string
+}

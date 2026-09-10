@@ -8,3 +8,6 @@ cost_center                  = "enterprise-modernization"
 invoice_storage_account_name = "steippproddata2978a89b"
 function_app_name            = "func-eipp-prod-cus-2978a89b"
 function_service_plan_name   = "asp-eipp-prod-cus"
+
+eventgrid_system_topic_name = "evgt-eipp-prod-invoice-cus"
+eventgrid_subscription_name = "evgs-eipp-prod-raw-blob-created"
